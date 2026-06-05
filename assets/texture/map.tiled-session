@@ -1,0 +1,23 @@
+{
+    "activeFile": "",
+    "expandedProjectPaths": [
+    ],
+    "fileStates": {
+        "#tiles": {
+            "scaleInDock": 1
+        }
+    },
+    "last.imagePath": "D:/SFMLVSCode/Code/RPGGames/RPGGames/assets/texture",
+    "map.tileHeight": 1080,
+    "map.tileWidth": 1920,
+    "openFiles": [
+    ],
+    "project": "map.tiled-project",
+    "recentFiles": [
+    ],
+    "tileset.embedInMap": true,
+    "tileset.tileSize": {
+        "height": 32,
+        "width": 64
+    }
+}

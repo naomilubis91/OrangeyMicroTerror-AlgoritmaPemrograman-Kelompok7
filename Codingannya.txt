@@ -1,0 +1,993 @@
+#include <SFML/Graphics.hpp>
+#include <SFML/Audio.hpp> 
+#include <vector>
+#include <cmath>
+#include <cstdlib> 
+#include <string> 
+
+using namespace sf;
+using namespace Keyboard;
+using namespace std;
+
+// ==========================================
+// --- 1. STRUKTUR DATA ---
+// ==========================================
+struct Bullet {
+    Sprite sprite;
+    float velocityX;
+    float jarakDitempuh;
+    float batasJarak;
+    Bullet(const Texture& tex) : sprite(tex) {}
+};
+
+struct Partikel {
+    CircleShape shape;
+    Vector2f velocity;
+    float lifetime;
+    float maxLifetime;
+};
+
+struct Enemy {
+    Sprite sprite;
+    float velocityX = 0.0f;
+    float velocityY = 0.0f;
+    bool isJumping = true;
+    int state = 0;
+    float squashedTimer = 0.3f;
+    float animTimer = 0.0f;
+    int currentWalkIndex = 0;
+    Enemy(const Texture& tex) : sprite(tex) {}
+};
+
+struct PowerUp {
+    RectangleShape shape;
+    float velocityY = 0.0f;
+    int type = 0; // 0 = Heal HP, 1 = Extra Life
+};
+
+// ==========================================
+// --- FUNGSI UTAMA ---
+// ==========================================
+int main()
+{
+    RenderWindow window(VideoMode({ 1920, 1080 }), "OrangeyMicroTerror!!!", sf::State::Fullscreen);
+
+    // --- GAME STATE MACHINE ---
+    int gameState = 0; // 0 = Main Menu, 1 = Playing, 2 = Paused, 3 = Game Over
+    int lastGameState = -1; // Deteksi perubahan layar untuk BGM
+    bool escPressed = false;
+    bool mouseClicked = false;
+
+    // ==========================================
+    // --- SETUP AUDIO (BGM & SFX) ---
+    // ==========================================
+    // 💡 PENGATURAN VOLUME GLOBAL (0.0f - 100.0f)
+    float volumeMusik = 40.0f;
+    float volumeEfek = 80.0f;
+
+    Music bgmMenu, bgmPlay, bgmGameOver;
+    bgmMenu.openFromFile("assets/sound/Game_Menu.ogg");
+    bgmMenu.setLooping(true);
+    bgmMenu.setVolume(volumeMusik);
+
+    bgmPlay.openFromFile("assets/sound/Game_Play.ogg");
+    bgmPlay.setLooping(true);
+    bgmPlay.setVolume(volumeMusik);
+
+    bgmGameOver.openFromFile("assets/sound/Game_Over.ogg");
+    bgmGameOver.setLooping(true);
+    bgmGameOver.setVolume(volumeMusik);
+
+    SoundBuffer bufPowerUp, bufHit, bufJump, bufTowerHit, bufButton, bufShot;
+    bufPowerUp.loadFromFile("assets/sound/makan_power_up.ogg");
+    bufHit.loadFromFile("assets/sound/kena_hit.ogg");
+    bufJump.loadFromFile("assets/sound/lompat.ogg");
+    bufTowerHit.loadFromFile("assets/sound/tower_kena hit.ogg");
+    bufButton.loadFromFile("assets/sound/button_press.ogg");
+    bufShot.loadFromFile("assets/sound/shot.ogg"); // <-- TAMBAHAN AUDIO TEMBAKAN
+
+    Sound sndPowerUp(bufPowerUp); sndPowerUp.setVolume(volumeEfek);
+    Sound sndHit(bufHit); sndHit.setVolume(volumeEfek);
+    Sound sndJump(bufJump); sndJump.setVolume(volumeEfek);
+    Sound sndTowerHit(bufTowerHit); sndTowerHit.setVolume(volumeEfek);
+    Sound sndButton(bufButton); sndButton.setVolume(volumeEfek);
+    Sound sndShot(bufShot); sndShot.setVolume(volumeEfek); // <-- SETUP AUDIO TEMBAKAN
+
+    Sound sndEnemyJump(bufJump); sndEnemyJump.setVolume(volumeEfek * 0.3f);
+    // ==========================================
+
+    // --- SETUP PLAYER ---
+    Texture playMovementTexture;
+    playMovementTexture.loadFromFile("assets/texture/player/PlayMovement.png");
+    int frameWidth = 16;
+    int frameHeight = 16;
+    IntRect frameRect({ 0, 0 }, { frameWidth, frameHeight });
+
+    Sprite player(playMovementTexture);
+    player.setTextureRect(frameRect);
+    player.setScale({ 2.0f, 2.0f });
+    player.setPosition({ 960.0f, 200.0f });
+    player.setOrigin({ frameWidth / 2.0f, frameHeight / 2.0f });
+
+    // --- SETUP PELURU & ITEM ---
+    Texture peluruTexture;
+    peluruTexture.loadFromFile("assets/texture/sausage.png");
+    vector<Bullet> daftarPeluru;
+    vector<Partikel> daftarPartikel;
+    vector<PowerUp> daftarPowerUp;
+
+    bool isSpressed = false;
+    float shootCooldown = 0.5f;
+    float shootCooldownTimer = 0.0f;
+
+    // --- SETUP ENEMY ---
+    Texture enemyTexture;
+    enemyTexture.loadFromFile("assets/texture/enemy/EnemyMovement.png");
+    vector<Enemy> daftarMusuh;
+    float enemySpawnTimer = 0.0f;
+    float enemySpawnInterval = 3.0f;
+
+    // --- ANIMASI PLAYER ---
+    vector<int> animSequence = { 0, 1, 2, 3, 2, 1 };
+    int currentAnimIndex = 0;
+    float animTimer = 0.0f;
+    float animSpeed = 0.1f;
+    bool isCrouching = false;
+    vector<int> walkSequence = { 0, 1, 2 };
+    int currentWalkIndex = 0;
+
+    // --- SETUP BACKGROUND & TILEMAP ---
+    Texture bgTexture;
+    bgTexture.loadFromFile("assets/texture/background.png");
+    Sprite background(bgTexture);
+
+    Texture tileTexture;
+    tileTexture.loadFromFile("assets/texture/tiles.png");
+    Sprite tileSprite(tileTexture);
+    float tileSize = 16.0f;
+    tileSprite.setScale({ 2.0f, 2.0f });
+    tileSprite.setOrigin({ 0.0f, 0.0f });
+    float scaledTileSize = tileSize * tileSprite.getScale().x;
+
+    const int mapRows = 34;
+    const int mapCols = 60;
+
+    // --- SETUP TOWER / BUNGA ---
+    Texture flowerTexture;
+    flowerTexture.loadFromFile("assets/texture/Tree.png");
+    Sprite flower(flowerTexture);
+    flower.setOrigin({ 64.0f, 128.0f });
+    flower.setPosition({ 30.2f * scaledTileSize, 20.0f * scaledTileSize });
+    flower.setScale({ 2.5f, 2.5f });
+
+    // --- SETUP STATUS GAME ---
+    int flowerMaxHP = 10;
+    int flowerHP = flowerMaxHP;
+    float towerDamageTimer = 0.0f;
+
+    int playerMaxHP = 5;
+    int playerHP = playerMaxHP;
+    int playerLives = 3;
+
+    // --- KONFIGURASI FISIKA ---
+    float maxSpeed = 180.0f;
+    float acceleration = 600.0f;
+    float friction = 800.0f;
+    float gravity = 700.0f;
+    float jumpForce = -300.0f;
+    float velocityX = 0.0f;
+    float velocityY = 0.0f;
+    bool isJumping = true;
+
+    Clock clock;
+    float invincibilityTimer = 0.0f;
+
+    // --- SETUP FONT & SISTEM SKOR ---
+    Font font;
+    if (!font.openFromFile("assets/fonts/8bit.ttf")) {}
+    int score = 0;
+    Text scoreText(font);
+    scoreText.setCharacterSize(40);
+    scoreText.setFillColor(Color::White);
+    scoreText.setPosition({ 850.0f, 980.0f });
+
+    // ==========================================
+    // --- SETUP UI MENU & TOMBOL ---
+    // ==========================================
+    Texture titleMenuTex;
+    titleMenuTex.loadFromFile("assets/texture/titlemenu.png");
+    Sprite titleMenu(titleMenuTex);
+
+    Texture playTex; playTex.loadFromFile("assets/texture/button/play_button.png");
+    Sprite playBtn(playTex);
+    playBtn.setOrigin({ playTex.getSize().x / 2.0f, playTex.getSize().y / 2.0f });
+    playBtn.setPosition({ 1920.0f / 2.0f, 600.0f });
+    playBtn.setScale({ 3.0f, 3.0f });
+
+    Texture quitTex; quitTex.loadFromFile("assets/texture/button/quit_button.png");
+    Sprite quitBtn(quitTex);
+    quitBtn.setOrigin({ quitTex.getSize().x / 2.0f, quitTex.getSize().y / 2.0f });
+    quitBtn.setPosition({ 1920.0f / 2.0f, 800.0f });
+    quitBtn.setScale({ 3.0f, 3.0f });
+
+    Sprite quitBtnPause(quitTex);
+    quitBtnPause.setOrigin({ quitTex.getSize().x / 2.0f, quitTex.getSize().y / 2.0f });
+    quitBtnPause.setPosition({ 1920.0f / 2.0f, 700.0f });
+    quitBtnPause.setScale({ 3.0f, 3.0f });
+
+    Texture resumeTex; resumeTex.loadFromFile("assets/texture/button/resume_button.png");
+    Sprite resumeBtn(resumeTex);
+    resumeBtn.setOrigin({ resumeTex.getSize().x / 2.0f, resumeTex.getSize().y / 2.0f });
+    resumeBtn.setPosition({ 1920.0f / 2.0f, 300.0f });
+    resumeBtn.setScale({ 3.0f, 3.0f });
+
+    Texture restartTex;
+    restartTex.loadFromFile("assets/texture/button/restart_button.png");
+    Sprite restartBtn(restartTex);
+    restartBtn.setOrigin({ restartTex.getSize().x / 2.0f, restartTex.getSize().y / 2.0f });
+    restartBtn.setPosition({ 1920.0f / 2.0f, 500.0f });
+    restartBtn.setScale({ 3.0f, 3.0f });
+
+    Texture gameoverTex; gameoverTex.loadFromFile("assets/texture/gameover.png");
+    Sprite gameoverSprite(gameoverTex);
+    gameoverSprite.setOrigin({ gameoverTex.getSize().x / 2.0f, gameoverTex.getSize().y / 2.0f });
+    gameoverSprite.setPosition({ 1920.0f / 2.0f, 1080.0f / 2.0f - 150.0f });
+    gameoverSprite.setScale({ 1.0f, 1.0f });
+
+    Texture restartSquareTex; restartSquareTex.loadFromFile("assets/texture/restart_square.png");
+    Sprite restartSquareBtn(restartSquareTex);
+    restartSquareBtn.setOrigin({ restartSquareTex.getSize().x / 2.0f, restartSquareTex.getSize().y / 2.0f });
+    restartSquareBtn.setPosition({ 1920.0f / 2.0f, 1080.0f / 2.0f + 300.0f });
+    restartSquareBtn.setScale({ 3.0f, 3.0f });
+
+    // FUNGSI RESET GAME
+    auto resetGame = [&]() {
+        playerHP = playerMaxHP;
+        playerLives = 3;
+        flowerHP = flowerMaxHP;
+        score = 0;
+        player.setPosition({ 960.0f, 200.0f });
+        velocityX = 0.0f; velocityY = 0.0f;
+        isJumping = true;
+        daftarMusuh.clear();
+        daftarPeluru.clear();
+        daftarPartikel.clear();
+        daftarPowerUp.clear();
+        invincibilityTimer = 2.0f;
+        shootCooldownTimer = 0.0f;
+        enemySpawnTimer = 0.0f;
+        towerDamageTimer = 0.0f;
+        };
+
+    // --- SETUP KAMERA & MINIMAP ---
+    float mapWidth = mapCols * scaledTileSize;
+    float mapHeight = mapRows * scaledTileSize;
+    View mainView(FloatRect({ 0.0f, 0.0f }, { 1920.0f / 2.0f, 1080.0f / 2.5f }));
+    View minimapView;
+    minimapView.setCenter({ mapWidth / 2.0f, mapHeight / 2.0f });
+    minimapView.setSize({ mapWidth, mapHeight });
+    minimapView.setViewport(FloatRect({ 0.82f, 0.02f }, { 0.15f, 0.15f * (1920.0f / 1080.0f) }));
+
+    // --- MAP ARRAYS ---
+    int bgMap[mapRows][mapCols] = {
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+    };
+
+    // Level Map (Tanah & Platform)
+    int levelMap[mapRows][mapCols] = {
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {3,3,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,3,3,3,3,3,3,3},
+    {2,2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,4,0,0,0,0,0,0,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,2,2,2},
+    {2,2,2,2,2,2,2,2,3,3,0,0,0,0,0,0,0,0,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,4,4,4,4,4,4,0,0,0,0,0,0,0,0,3,3,2,2,2,2,2,2,2,2},
+    {2,2,2,2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,2,2,2,2,2},
+    {1,1,1,1,1,1,1,1,2,2,3,3,3,3,0,0,0,0,0,0,0,0,0,0,4,4,4,4,1,1,1,1,4,4,4,4,0,0,0,0,0,0,0,0,0,0,3,3,3,3,2,2,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,2,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,2,2,2,2,2,2,3,3,0,0,0,0,0,0,4,4,0,0,0,0,1,1,1,1,0,0,0,0,4,4,0,0,0,0,0,0,3,3,2,2,2,2,2,2,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,3,3,0,0,4,4,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,4,4,0,0,3,3,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,3,3,0,0,4,4,4,4,4,4,1,1,1,1,4,4,4,4,4,4,4,4,0,0,3,3,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,3,3,3,3,3,3,3,3,1,1,1,1,3,3,3,3,3,3,3,3,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,1,1,1,1,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,1,1,1,1,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,1,1,1,1,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}
+    };
+
+    // ==========================================
+    // --- GAME LOOP UTAMA ---
+    // ==========================================
+    while (window.isOpen())
+    {
+        Time timesincelastframe = clock.restart();
+        float dt = timesincelastframe.asSeconds();
+
+        while (auto event = window.pollEvent())
+        {
+            if (event->is<Event::Closed>()) window.close();
+        }
+
+        // ==========================================
+        // --- LOGIKA MUSIK BERDASARKAN STATE ---
+        // ==========================================
+        if (gameState != lastGameState) {
+            if (gameState == 0) { // Main Menu
+                bgmPlay.stop();
+                bgmGameOver.stop();
+                if (bgmMenu.getStatus() != sf::SoundSource::Status::Playing) bgmMenu.play();
+            }
+            else if (gameState == 1) { // Playing
+                if (lastGameState == 2) {
+                    bgmPlay.play(); // Lanjutkan dari jeda pause
+                }
+                else {
+                    bgmMenu.stop();
+                    bgmGameOver.stop();
+                    bgmPlay.setPlayingOffset(Time::Zero);
+                    bgmPlay.play(); // Mulai dari awal jika dari Main Menu/Game Over
+                }
+            }
+            else if (gameState == 2) { // Paused
+                bgmPlay.pause(); // Jeda musik bermain
+            }
+            else if (gameState == 3) { // Game Over
+                bgmPlay.stop();
+                bgmGameOver.play(); // Mainkan musik sedih
+            }
+            lastGameState = gameState;
+        }
+
+        // --- SISTEM INPUT MOUSE & TOMBOL ESCAPE (DIPERBARUI UNTUK SFML 3) ---
+        if (Keyboard::isKeyPressed(Keyboard::Key::Escape)) {
+            if (!escPressed) {
+                if (gameState == 1) gameState = 2; // Ke Pause Menu
+                else if (gameState == 2) gameState = 1; // Kembali ke Game
+                escPressed = true;
+            }
+        }
+        else {
+            escPressed = false;
+        }
+
+        if (Mouse::isButtonPressed(Mouse::Button::Left)) {
+            if (!mouseClicked) {
+                // Konversi posisi klik mouse murni menggunakan default view agar UI akurat
+                Vector2i pixelPos = Mouse::getPosition(window);
+                Vector2f mousePos = window.mapPixelToCoords(pixelPos, window.getDefaultView());
+
+                if (gameState == 0) { // KLIK DI MAIN MENU
+                    if (playBtn.getGlobalBounds().contains(mousePos)) {
+                        sndShot.play(); // <--- UBAH DI SINI
+                        resetGame();
+                        gameState = 1;
+                    }
+                    if (quitBtn.getGlobalBounds().contains(mousePos)) {
+                        sndShot.play(); // <--- UBAH DI SINI
+                        window.close();
+                    }
+                }
+                else if (gameState == 2) { // KLIK DI PAUSE MENU
+                    if (resumeBtn.getGlobalBounds().contains(mousePos)) { sndShot.play(); gameState = 1; } // <--- UBAH DI SINI
+                    if (restartBtn.getGlobalBounds().contains(mousePos)) { sndShot.play(); resetGame(); gameState = 1; } // <--- UBAH DI SINI
+                    if (quitBtnPause.getGlobalBounds().contains(mousePos)) { sndShot.play(); gameState = 0; } // <--- UBAH DI SINI
+                }
+                else if (gameState == 3) { // KLIK DI GAME OVER
+                    if (restartSquareBtn.getGlobalBounds().contains(mousePos)) {
+                        sndShot.play(); // <--- UBAH DI SINI
+                        resetGame();
+                        gameState = 1;
+                    }
+                }
+                mouseClicked = true;
+            }
+        }
+        else {
+            mouseClicked = false;
+        }
+
+        // ==========================================
+        // --- LOGIKA GAME (HANYA AKTIF SAAT PLAYING) ---
+        // ==========================================
+        if (gameState == 1)
+        {
+            if (shootCooldownTimer > 0.0f) shootCooldownTimer -= dt;
+            if (invincibilityTimer > 0.0f) invincibilityTimer -= dt;
+
+            // --- FIX BUG MENARA: Kurangi timer kedip merah menara ---
+            if (towerDamageTimer > 0.0f) towerDamageTimer -= dt;
+
+            // --- FITUR DEBUG KILLALL (Tekan K) ---
+            if (Keyboard::isKeyPressed(Keyboard::Key::K)) {
+                playerHP = 0;   // Set HP pemain jadi 0
+                flowerHP = 0;   // Set HP menara jadi 0
+                gameState = 3;  // Langsung pindah ke layar Game Over!
+            }
+
+            // --- UPDATE KAMERA UTAMA ---
+            float halfW = mainView.getSize().x / 2.0f;
+            float halfH = mainView.getSize().y / 2.0f;
+            float camX = std::max(halfW, std::min(player.getPosition().x, mapWidth - halfW));
+            float camY = std::max(halfH, std::min(player.getPosition().y, mapHeight - halfH));
+            mainView.setCenter({ camX, camY });
+
+            // --- 1. LOGIKA INPUT & ANIMASI ---
+            isCrouching = false;
+            if (isKeyPressed(Key::S) && !isJumping) {
+                isCrouching = true;
+                if (!isSpressed && shootCooldownTimer <= 0.0f) {
+                    Bullet p(peluruTexture);
+                    p.sprite.setOrigin({ 8.0f, 8.0f });
+
+                    float arah = (player.getScale().x > 0) ? 1.0f : -1.0f;
+                    float geserX = 20.0f;
+                    float geserY = 5.0f;
+
+                    p.sprite.setPosition({ player.getPosition().x + (arah * geserX), player.getPosition().y + geserY });
+                    p.sprite.setScale({ 2.0f * arah, 2.0f });
+                    p.velocityX = arah * 500.0f;
+                    p.jarakDitempuh = 0.0f;
+                    p.batasJarak = 450.0f;
+
+                    daftarPeluru.push_back(p);
+                    isSpressed = true;
+                    shootCooldownTimer = shootCooldown;
+
+                    // --- MEMAINKAN EFEK SUARA TEMBAKAN! ---
+                    sndShot.play();
+                }
+            }
+            else if (!isKeyPressed(Key::S)) isSpressed = false;
+
+            if (isCrouching) {
+                frameRect.position.y = 1 * frameHeight; frameRect.position.x = 2 * frameWidth; player.setTextureRect(frameRect);
+            }
+            else if (isJumping) {
+                float peakThreshold = 50.0f;
+                if (velocityY < -peakThreshold) frameRect.position.x = 0 * frameWidth;
+                else if (velocityY > peakThreshold) frameRect.position.x = 1 * frameWidth;
+                else frameRect.position.x = 3 * frameWidth;
+                frameRect.position.y = 1 * frameHeight; player.setTextureRect(frameRect);
+            }
+            else if (abs(velocityX) > 0.1f) {
+                animTimer += dt;
+                if (animTimer >= animSpeed) {
+                    animTimer = 0.0f; currentWalkIndex++; if (currentWalkIndex >= walkSequence.size()) currentWalkIndex = 0;
+                }
+                frameRect.position.y = 2 * frameHeight; frameRect.position.x = walkSequence[currentWalkIndex] * frameWidth; player.setTextureRect(frameRect);
+            }
+            else {
+                animTimer += dt;
+                float currentFrameDuration = (animSequence[currentAnimIndex] == 0) ? 2.0f : animSpeed;
+                if (animTimer >= currentFrameDuration) {
+                    animTimer = 0.0f; currentAnimIndex++; if (currentAnimIndex >= animSequence.size()) currentAnimIndex = 0;
+                }
+                frameRect.position.y = 0 * frameHeight; frameRect.position.x = animSequence[currentAnimIndex] * frameWidth; player.setTextureRect(frameRect);
+            }
+
+            // --- 2. LOGIKA FISIKA X & Y ---
+            if (isKeyPressed(Key::A)) player.setScale({ -2.0f, 2.0f });
+            if (isKeyPressed(Key::D)) player.setScale({ 2.0f, 2.0f });
+
+            if (!isCrouching) {
+                if (isKeyPressed(Key::A)) velocityX -= acceleration * dt;
+                else if (isKeyPressed(Key::D)) velocityX += acceleration * dt;
+                else {
+                    if (velocityX > 0.0f) {
+                        velocityX -= friction * dt;
+                        if (velocityX < 0.0f) velocityX = 0.0f;
+                    }
+                    else if (velocityX < 0.0f) {
+                        velocityX += friction * dt;
+                        if (velocityX > 0.0f) velocityX = 0.0f;
+                    }
+                }
+            }
+            else {
+                if (velocityX > 0.0f) {
+                    velocityX -= friction * dt;
+                    if (velocityX < 0.0f) velocityX = 0.0f;
+                }
+                else if (velocityX < 0.0f) {
+                    velocityX += friction * dt;
+                    if (velocityX > 0.0f) velocityX = 0.0f;
+                }
+            }
+
+            if (velocityX > maxSpeed) velocityX = maxSpeed;
+            if (velocityX < -maxSpeed) velocityX = -maxSpeed;
+
+            if ((isKeyPressed(Key::W) || isKeyPressed(Key::Space)) && !isJumping && !isCrouching) {
+                velocityY = jumpForce; isJumping = true;
+                sndJump.play(); // EFEK SUARA LOMPAT PLAYER
+            }
+
+            float currentGravity = gravity;
+            if (isJumping && std::abs(velocityY) < 50.0f) currentGravity = gravity * 0.3f;
+            else if (velocityY > 0.0f) currentGravity = gravity * 1.8f;
+
+            velocityY += currentGravity * dt;
+            if (!isKeyPressed(Key::W) && !isKeyPressed(Key::Space) && velocityY < 0.0f) velocityY += gravity * 2.0f * dt;
+
+            // --- 3. TABRAKAN PLAYER (HITBOX KONSISTEN) ---
+            float pW = 16.0f; float pH = 16.0f; float pOX = 0.0f; float pOY = 8.0f;
+
+            player.move({ velocityX * dt, 0.f });
+            FloatRect playerHitboxX({ player.getPosition().x - (pW / 2.f) + pOX, player.getPosition().y - (pH / 2.f) + pOY }, { pW, pH });
+
+            for (int r = 0; r < mapRows; r++) {
+                for (int c = 0; c < mapCols; c++) {
+                    int jenis = levelMap[r][c];
+                    if (jenis >= 1 && jenis <= 3) {
+                        FloatRect tBox({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, scaledTileSize });
+                        if (playerHitboxX.findIntersection(tBox)) {
+                            if (velocityX > 0) player.setPosition({ tBox.position.x - (pW / 2.f) - pOX - 0.1f, player.getPosition().y });
+                            if (velocityX < 0) player.setPosition({ tBox.position.x + tBox.size.x + (pW / 2.f) - pOX + 0.1f, player.getPosition().y });
+                            velocityX = 0.f;
+                        }
+                    }
+                }
+            }
+
+            float prevBottom = playerHitboxX.position.y + pH;
+            isJumping = true;
+            player.move({ 0.f, velocityY * dt });
+            FloatRect playerHitbox({ player.getPosition().x - (pW / 2.f) + pOX, player.getPosition().y - (pH / 2.f) + pOY }, { pW, pH });
+
+            for (int r = 0; r < mapRows; r++) {
+                for (int c = 0; c < mapCols; c++) {
+                    int jenis = levelMap[r][c];
+                    if (jenis > 0) {
+                        FloatRect tBox({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, scaledTileSize });
+                        if (jenis == 4) {
+                            float ketebalan = 10.0f * tileSprite.getScale().y;
+                            FloatRect pBox({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, ketebalan });
+                            if (playerHitbox.findIntersection(pBox) && velocityY > 0 && prevBottom <= pBox.position.y + 15.0f) {
+                                player.setPosition({ player.getPosition().x, pBox.position.y - (pH / 2.f) - pOY });
+                                velocityY = 0.f; isJumping = false;
+                            }
+                        }
+                        else if (jenis >= 1 && jenis <= 3) {
+                            if (playerHitbox.findIntersection(tBox)) {
+                                if (velocityY > 0) { player.setPosition({ player.getPosition().x, tBox.position.y - (pH / 2.f) - pOY }); velocityY = 0.f; isJumping = false; }
+                                else if (velocityY < 0) { player.setPosition({ player.getPosition().x, tBox.position.y + tBox.size.y + (pH / 2.f) - pOY }); velocityY = 0.f; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --- UPDATE MUSUH (SPAWNER, FISIKA, & AI) ---
+            enemySpawnInterval = std::max(0.5f, 3.0f - (score / 50.0f) * 0.2f);
+            enemySpawnTimer += dt;
+            if (enemySpawnTimer >= enemySpawnInterval) {
+                enemySpawnTimer = 0.0f;
+                Enemy e(enemyTexture); e.sprite.setOrigin({ 8.0f, 8.0f }); e.sprite.setScale({ 2.0f, 2.0f });
+                float spawnY = (16 * scaledTileSize) - 40.0f;
+                if (rand() % 2 == 0) { e.sprite.setPosition({ 0.5f * scaledTileSize, spawnY }); e.velocityX = 100.0f; }
+                else { e.sprite.setPosition({ 58.5f * scaledTileSize, spawnY }); e.velocityX = -100.0f; }
+                e.isJumping = false; daftarMusuh.push_back(e);
+            }
+
+            for (int i = 0; i < daftarMusuh.size(); i++) {
+                Enemy& e = daftarMusuh[i];
+                if (e.state == 1) {
+                    e.squashedTimer -= dt; e.sprite.setTextureRect(IntRect({ 3 * 16, 1 * 16 }, { 16, 16 }));
+                    if (e.squashedTimer <= 0.0f) {
+                        for (int p = 0; p < 8; p++) {
+                            Partikel partikel; partikel.shape.setRadius(4.0f); partikel.shape.setFillColor(Color(50, 205, 50)); partikel.shape.setPosition(e.sprite.getPosition());
+                            float angle = (rand() % 360) * 3.14159f / 180.f; float speed = (rand() % 200) + 100.0f;
+                            partikel.velocity = Vector2f(cos(angle) * speed, sin(angle) * speed); partikel.maxLifetime = 0.3f; partikel.lifetime = partikel.maxLifetime;
+                            daftarPartikel.push_back(partikel);
+                        }
+                        daftarMusuh.erase(daftarMusuh.begin() + i); i--;
+                    }
+                    continue;
+                }
+
+                // FISIKA MUSUH
+                e.velocityY += gravity * dt;
+                float eW = 16.0f; float eH = 16.0f; float eOX = 0.0f; float eOY = 8.0f;
+                if (e.velocityX > 0) e.sprite.setScale({ 2.0f, 2.0f }); else e.sprite.setScale({ -2.0f, 2.0f });
+
+                e.sprite.move({ e.velocityX * dt, 0.f });
+                FloatRect eHitboxX({ e.sprite.getPosition().x - (eW / 2.f) + eOX, e.sprite.getPosition().y - (eH / 2.f) + eOY }, { eW, eH - 4.0f });
+                bool hitWall = false;
+                for (int r = 0; r < mapRows; r++) {
+                    for (int c = 0; c < mapCols; c++) {
+                        if (levelMap[r][c] >= 1 && levelMap[r][c] <= 3) {
+                            FloatRect tBox({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, scaledTileSize });
+                            if (eHitboxX.findIntersection(tBox)) {
+                                if (e.velocityX > 0) e.sprite.setPosition({ tBox.position.x - (eW / 2.f) - eOX - 0.1f, e.sprite.getPosition().y });
+                                else if (e.velocityX < 0) e.sprite.setPosition({ tBox.position.x + tBox.size.x + (eW / 2.f) - eOX + 0.1f, e.sprite.getPosition().y });
+                                hitWall = true; break;
+                            }
+                        }
+                    }
+                    if (hitWall) break;
+                }
+
+                float jarakX = std::abs(e.sprite.getPosition().x - flower.getPosition().x);
+                float jarakY = std::abs(e.sprite.getPosition().y - flower.getPosition().y);
+
+                if (hitWall) {
+                    if (!e.isJumping) {
+                        e.velocityY = jumpForce * 1.1f; e.isJumping = true;
+                        sndEnemyJump.play(); // EFEK MUSUH MELOMPAT
+                    }
+                    else e.velocityX = -e.velocityX;
+                }
+
+                if (jarakX < 250.0f && jarakY < 100.0f) {
+                    if (jarakX < 10.0f) e.velocityX = 0.0f;
+                    else if (e.sprite.getPosition().x < flower.getPosition().x) e.velocityX = std::abs(e.velocityX); else e.velocityX = -std::abs(e.velocityX);
+                }
+                else {
+                    for (int j = 0; j < daftarMusuh.size(); j++) {
+                        if (i == j || daftarMusuh[j].state == 1) continue;
+                        FloatRect e2Hitbox({ daftarMusuh[j].sprite.getPosition().x - (eW / 2.f), daftarMusuh[j].sprite.getPosition().y - (eH / 2.f) + eOY }, { eW, eH });
+                        if (eHitboxX.findIntersection(e2Hitbox)) {
+                            if (e.sprite.getPosition().x < daftarMusuh[j].sprite.getPosition().x) e.velocityX = -std::abs(e.velocityX); else e.velocityX = std::abs(e.velocityX);
+                        }
+                    }
+                }
+
+                if (!e.isJumping) {
+                    float arahMaju = (e.velocityX > 0) ? 1.0f : -1.0f;
+                    float sensorX = e.sprite.getPosition().x + eOX + (arahMaju * (eW / 2.f + 5.0f)); float sensorY = e.sprite.getPosition().y + eOY + (eH / 2.f) + 5.0f;
+                    int gridX = static_cast<int>(sensorX / scaledTileSize); int gridY = static_cast<int>(sensorY / scaledTileSize);
+                    bool adaPijakan = false;
+                    if (gridY >= 0 && gridY < mapRows && gridX >= 0 && gridX < mapCols) {
+                        int tile = levelMap[gridY][gridX]; if (tile >= 1 && tile <= 4) adaPijakan = true;
+                    }
+                    if (!adaPijakan) {
+                        e.velocityY = jumpForce * 1.1f; e.isJumping = true;
+                        sndEnemyJump.play(); // EFEK MUSUH MELOMPAT
+                    }
+                }
+
+                FloatRect eHitbox({ e.sprite.getPosition().x - (eW / 2.f) + eOX, e.sprite.getPosition().y - (eH / 2.f) + eOY }, { eW, eH });
+                float ePrevBottom = eHitbox.position.y + eHitbox.size.y;
+                e.isJumping = true; e.sprite.move({ 0.f, e.velocityY * dt });
+                eHitbox = FloatRect({ e.sprite.getPosition().x - (eW / 2.f) + eOX, e.sprite.getPosition().y - (eH / 2.f) + eOY }, { eW, eH });
+
+                for (int r = 0; r < mapRows; r++) {
+                    for (int c = 0; c < mapCols; c++) {
+                        int jenis = levelMap[r][c];
+                        if (jenis > 0) {
+                            FloatRect tBox({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, scaledTileSize });
+                            if (jenis == 4) {
+                                float ket = 10.0f * tileSprite.getScale().y; FloatRect pBox({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, ket });
+                                if (eHitbox.findIntersection(pBox) && e.velocityY > 0 && ePrevBottom <= pBox.position.y + 15.0f) { e.sprite.setPosition({ e.sprite.getPosition().x, pBox.position.y - (eH / 2.f) - eOY }); e.velocityY = 0.f; e.isJumping = false; }
+                            }
+                            else if (jenis >= 1 && jenis <= 3) {
+                                if (eHitbox.findIntersection(tBox)) {
+                                    if (e.velocityY > 0) { e.sprite.setPosition({ e.sprite.getPosition().x, tBox.position.y - (eH / 2.f) - eOY }); e.velocityY = 0.f; e.isJumping = false; }
+                                    else if (e.velocityY < 0) { e.sprite.setPosition({ e.sprite.getPosition().x, tBox.position.y + tBox.size.y + (eH / 2.f) - eOY }); e.velocityY = 0.f; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (e.isJumping) {
+                    if (e.velocityY < -50.0f) e.sprite.setTextureRect(IntRect({ 0 * 16, 1 * 16 }, { 16, 16 }));
+                    else if (e.velocityY > 50.0f) e.sprite.setTextureRect(IntRect({ 1 * 16, 1 * 16 }, { 16, 16 }));
+                    else e.sprite.setTextureRect(IntRect({ 2 * 16, 1 * 16 }, { 16, 16 }));
+                }
+                else {
+                    e.animTimer += dt; if (e.animTimer >= 0.15f) { e.animTimer = 0.0f; e.currentWalkIndex++; if (e.currentWalkIndex > 3) e.currentWalkIndex = 1; }
+                    e.sprite.setTextureRect(IntRect({ e.currentWalkIndex * 16, 0 * 16 }, { 16, 16 }));
+                }
+
+                // TABRAKAN BUNGA & GAME OVER CHECK
+                float fHitW = 120.0f; float fHitH = 300.0f; float fOX = -8.0f; float fOY = 0.0f;
+                FloatRect flowerHitbox({ flower.getPosition().x - (fHitW / 2.f) + fOX, flower.getPosition().y - fHitH + fOY }, { fHitW, fHitH });
+                if (flowerHP > 0 && eHitbox.findIntersection(flowerHitbox)) {
+                    flowerHP -= 1; e.state = 1; e.squashedTimer = 0.0f; towerDamageTimer = 0.2f;
+                    sndTowerHit.play(); // EFEK MENARA KENA DAMAGE
+                    if (flowerHP <= 0) gameState = 3;
+                }
+
+                // TABRAKAN PLAYER & GAME OVER CHECK
+                if (playerHitbox.findIntersection(eHitbox)) {
+                    if (velocityY > 0 && player.getPosition().y < e.sprite.getPosition().y - 10.0f) {
+                        e.state = 1; velocityY = jumpForce * 0.8f; isJumping = true; score += 5;
+                        sndHit.play(); // EFEK MUSUH KEINJAK
+                    }
+                    else if (invincibilityTimer <= 0.0f) {
+                        float knockDir = (player.getPosition().x < e.sprite.getPosition().x) ? -1.0f : 1.0f;
+                        velocityX = knockDir * 400.0f; velocityY = -200.0f;
+                        if (playerHP > 0) {
+                            playerHP -= 1; invincibilityTimer = 1.5f;
+                            sndHit.play(); // EFEK PLAYER KENA HIT
+                            if (playerHP <= 0) {
+                                playerLives -= 1;
+                                if (playerLives > 0) { playerHP = playerMaxHP; player.setPosition({ 960.0f, 200.0f }); invincibilityTimer = 2.0f; }
+                                else gameState = 3;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --- PELURU ---
+            for (int i = 0; i < daftarPeluru.size(); i++) {
+                float gerakX = daftarPeluru[i].velocityX * dt;
+                daftarPeluru[i].sprite.move({ gerakX, 0.f }); daftarPeluru[i].jarakDitempuh += std::abs(gerakX);
+                float bW = 12.0f; float bH = 6.0f;
+                FloatRect bulletHitbox({ daftarPeluru[i].sprite.getPosition().x - (bW / 2.f), daftarPeluru[i].sprite.getPosition().y - (bH / 2.f) }, { bW, bH });
+                bool hancur = false;
+
+                for (int r = 0; r < mapRows; r++) {
+                    for (int c = 0; c < mapCols; c++) {
+                        int jns = levelMap[r][c];
+                        if (jns >= 1 && jns <= 3) { if (bulletHitbox.findIntersection(FloatRect({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, scaledTileSize }))) { hancur = true; break; } }
+                    } if (hancur) break;
+                }
+
+                for (int m = 0; m < daftarMusuh.size(); m++) {
+                    if (daftarMusuh[m].state == 1) continue;
+                    float eW = 16.0f; float eH = 16.0f; float eOY = 8.0f;
+                    FloatRect eHitbox({ daftarMusuh[m].sprite.getPosition().x - (eW / 2.f), daftarMusuh[m].sprite.getPosition().y - (eH / 2.f) + eOY }, { eW, eH });
+                    if (bulletHitbox.findIntersection(eHitbox)) {
+                        hancur = true; score += 5;
+                        sndHit.play(); // EFEK MUSUH KENA TEMBAK
+
+                        int gacha = rand() % 100;
+                        if (gacha < 20) {
+                            PowerUp pu; pu.shape.setSize({ 20.0f, 20.0f }); pu.shape.setOrigin({ 10.0f, 10.0f }); pu.shape.setPosition(daftarMusuh[m].sprite.getPosition()); pu.velocityY = -200.0f;
+                            if (gacha < 15) { pu.type = 0; pu.shape.setFillColor(Color::Green); }
+                            else { pu.type = 1; pu.shape.setFillColor(Color::Cyan); }
+                            pu.shape.setOutlineColor(Color::White); pu.shape.setOutlineThickness(2.0f); daftarPowerUp.push_back(pu);
+                        }
+                        for (int p = 0; p < 8; p++) {
+                            Partikel pt; pt.shape.setRadius(4.0f); pt.shape.setFillColor(Color(50, 205, 50)); pt.shape.setPosition(daftarMusuh[m].sprite.getPosition());
+                            float angle = (rand() % 360) * 3.14159f / 180.f; float speed = (rand() % 200) + 150.0f;
+                            pt.velocity = Vector2f(cos(angle) * speed, sin(angle) * speed); pt.maxLifetime = 0.3f; pt.lifetime = pt.maxLifetime; daftarPartikel.push_back(pt);
+                        }
+                        daftarMusuh.erase(daftarMusuh.begin() + m); break;
+                    }
+                }
+                if (hancur || daftarPeluru[i].jarakDitempuh >= daftarPeluru[i].batasJarak) {
+                    if (hancur) {
+                        for (int p = 0; p < 8; p++) {
+                            Partikel pt; pt.shape.setRadius(3.0f); pt.shape.setFillColor(Color(255, 140, 0)); pt.shape.setPosition(daftarPeluru[i].sprite.getPosition());
+                            float angle = (rand() % 360) * 3.14159f / 180.f; float speed = (rand() % 200) + 100.0f;
+                            pt.velocity = Vector2f(cos(angle) * speed, sin(angle) * speed); pt.maxLifetime = 0.2f; pt.lifetime = pt.maxLifetime; daftarPartikel.push_back(pt);
+                        }
+                    }
+                    daftarPeluru.erase(daftarPeluru.begin() + i); i--;
+                }
+            }
+
+            // --- PARTIKEL & POWER UP ---
+            for (int i = 0; i < daftarPartikel.size(); i++) {
+                daftarPartikel[i].shape.move({ daftarPartikel[i].velocity.x * dt, daftarPartikel[i].velocity.y * dt });
+                daftarPartikel[i].lifetime -= dt; if (daftarPartikel[i].lifetime <= 0.0f) { daftarPartikel.erase(daftarPartikel.begin() + i); i--; }
+            }
+            for (int i = 0; i < daftarPowerUp.size(); i++) {
+                daftarPowerUp[i].velocityY += gravity * dt; daftarPowerUp[i].shape.move({ 0.f, daftarPowerUp[i].velocityY * dt });
+                FloatRect puHitbox = daftarPowerUp[i].shape.getGlobalBounds();
+                for (int r = 0; r < mapRows; r++) {
+                    for (int c = 0; c < mapCols; c++) {
+                        if (levelMap[r][c] >= 1 && levelMap[r][c] <= 4) {
+                            FloatRect tBox({ c * scaledTileSize, r * scaledTileSize }, { scaledTileSize, scaledTileSize });
+                            if (levelMap[r][c] == 4) tBox.size.y = 10.0f * tileSprite.getScale().y;
+                            if (puHitbox.findIntersection(tBox) && daftarPowerUp[i].velocityY > 0) {
+                                daftarPowerUp[i].shape.setPosition({ daftarPowerUp[i].shape.getPosition().x, tBox.position.y - 10.0f }); daftarPowerUp[i].velocityY = 0.f;
+                            }
+                        }
+                    }
+                }
+                if (playerHitboxX.findIntersection(puHitbox)) {
+                    sndPowerUp.play(); // EFEK MAKAN POWER-UP
+                    if (daftarPowerUp[i].type == 0) { playerHP++; if (playerHP > playerMaxHP) playerHP = playerMaxHP; }
+                    else { playerLives++; }
+                    daftarPowerUp.erase(daftarPowerUp.begin() + i); i--;
+                }
+            }
+        } // --- SELESAI BLOK LOGIKA PLAYING ---
+
+        // ==========================================
+        // --- 4. RENDER KE LAYAR BERDASARKAN STATE ---
+        // ==========================================
+        window.clear();
+        if (gameState == 0) {
+            window.setView(window.getDefaultView());
+            window.draw(titleMenu);
+            window.draw(playBtn);
+            window.draw(quitBtn);
+        }
+        else {
+            // [TAHAP 1] KAMERA UTAMA
+            window.setView(mainView);
+            window.draw(background);
+
+            for (int r = 0; r < mapRows; r++) {
+                for (int c = 0; c < mapCols; c++) {
+                    int b = bgMap[r][c];
+                    if (b == 5 || b == 6) {
+                        tileSprite.setTextureRect(IntRect({ (b == 6) ? (int)tileSize * 2 : (int)tileSize * 2, (b == 6) ? 0 : (int)tileSize }, { (int)tileSize, (int)tileSize }));
+                        tileSprite.setPosition({ c * scaledTileSize, r * scaledTileSize }); tileSprite.setColor(Color(120, 120, 120)); window.draw(tileSprite);
+                    }
+                    int j = levelMap[r][c];
+                    if (j >= 1 && j <= 4) {
+                        int tX = 0, tY = 0;
+                        if (j == 1) { tX = 0; tY = 0; }
+                        else if (j == 2) { tX = (int)tileSize; tY = 0; }
+                        else if (j == 3) { tX = 0; tY = (int)tileSize; }
+                        else if (j == 4) { tX = (int)tileSize; tY = (int)tileSize; }
+                        tileSprite.setTextureRect(IntRect({ tX, tY }, { (int)tileSize, (int)tileSize }));
+                        tileSprite.setPosition({ c * scaledTileSize, r * scaledTileSize }); tileSprite.setColor(Color::White); window.draw(tileSprite);
+                    }
+                }
+            }
+
+            if (towerDamageTimer > 0.0f) flower.setColor(Color(255, 100, 100)); else flower.setColor(Color::White);
+            if (flowerHP > 0) window.draw(flower);
+
+            for (int i = 0; i < daftarPowerUp.size(); i++) window.draw(daftarPowerUp[i].shape);
+            for (int i = 0; i < daftarMusuh.size(); i++) window.draw(daftarMusuh[i].sprite);
+            for (int i = 0; i < daftarPeluru.size(); i++) window.draw(daftarPeluru[i].sprite);
+            for (int i = 0; i < daftarPartikel.size(); i++) window.draw(daftarPartikel[i].shape);
+            if (invincibilityTimer > 0.0f) { if ((int)(invincibilityTimer * 15) % 2 == 0) player.setColor(Color(255, 255, 255, 100)); else player.setColor(Color::White); }
+            else player.setColor(Color::White);
+            window.draw(player);
+
+            // [TAHAP 2] KAMERA MINIMAP
+            window.setView(minimapView);
+            RectangleShape radarGround({ mapWidth, mapHeight }); radarGround.setFillColor(Color(20, 20, 30, 200)); window.draw(radarGround);
+
+            RectangleShape miniBlock({ scaledTileSize, scaledTileSize });
+            for (int r = 0; r < mapRows; r++) {
+                for (int c = 0; c < mapCols; c++) {
+                    int jns = levelMap[r][c];
+                    if (jns >= 1 && jns <= 4) {
+                        miniBlock.setPosition({ c * scaledTileSize, r * scaledTileSize });
+                        if (jns == 4) { miniBlock.setSize({ scaledTileSize, 10.0f * tileSprite.getScale().y }); miniBlock.setFillColor(Color(139, 69, 19)); }
+                        else { miniBlock.setSize({ scaledTileSize, scaledTileSize }); miniBlock.setFillColor(Color(150, 150, 150)); }
+                        window.draw(miniBlock);
+                    }
+                }
+            }
+
+            RectangleShape dotTower({ 150.0f, 150.0f });
+            dotTower.setPosition({ flower.getPosition().x - 75.0f, flower.getPosition().y - 150.0f }); dotTower.setFillColor(Color::Magenta);
+            if (flowerHP > 0) window.draw(dotTower);
+
+            RectangleShape dotEnemy({ 80.0f, 80.0f }); dotEnemy.setFillColor(Color::Yellow);
+            for (int i = 0; i < daftarMusuh.size(); i++) { if (daftarMusuh[i].state == 1) continue; dotEnemy.setPosition(daftarMusuh[i].sprite.getPosition()); window.draw(dotEnemy); }
+
+            RectangleShape dotPlayer({ 100.0f, 100.0f }); dotPlayer.setFillColor(Color::Red); dotPlayer.setPosition(player.getPosition()); window.draw(dotPlayer);
+
+            // [TAHAP 3] UI NORMAL
+            window.setView(window.getDefaultView());
+            RectangleShape minimapBorder({ 1920.0f * 0.15f, 1080.0f * 0.15f * (1920.0f / 1080.0f) });
+            minimapBorder.setPosition({ 1920.0f * 0.82f, 1080.0f * 0.02f }); minimapBorder.setFillColor(Color::Transparent); minimapBorder.setOutlineColor(Color::White); minimapBorder.setOutlineThickness(5.0f); window.draw(minimapBorder);
+
+            RectangleShape uiBar({ 1920.0f, 120.0f });
+            uiBar.setPosition({ 0.0f, 960.0f }); uiBar.setFillColor(Color(25, 25, 25)); window.draw(uiBar);
+
+            // --- COOLDOWN BAR (SENJATA) ---
+            float maxCdWidth = 200.0f;
+            float cdPersentase = 1.0f - (shootCooldownTimer / shootCooldown);
+            if (cdPersentase < 0.0f) cdPersentase = 0.0f;
+            if (cdPersentase > 1.0f) cdPersentase = 1.0f;
+
+            RectangleShape cdBg({ maxCdWidth, 15.0f });
+            cdBg.setPosition({ 50.0f, 935.0f });
+            cdBg.setFillColor(Color(50, 50, 50));
+            cdBg.setOutlineColor(Color::White);
+            cdBg.setOutlineThickness(1.0f);
+            window.draw(cdBg);
+
+            RectangleShape cdFill({ maxCdWidth * cdPersentase, 15.0f });
+            cdFill.setPosition({ 50.0f, 935.0f });
+
+            if (shootCooldownTimer <= 0.0f) {
+                cdFill.setFillColor(Color::Yellow);
+            }
+            else {
+                cdFill.setFillColor(Color(255, 140, 0));
+            }
+            window.draw(cdFill);
+
+            for (int i = 0; i < playerMaxHP; i++) {
+                RectangleShape hpBox({ 30.0f, 30.0f });
+                hpBox.setPosition({ 50.0f + (i * 45.0f), 980.0f });
+                if (i < playerHP) hpBox.setFillColor(Color::Red); else hpBox.setFillColor(Color(80, 0, 0));
+                hpBox.setOutlineColor(Color::White); hpBox.setOutlineThickness(1.0f); window.draw(hpBox);
+            }
+            for (int i = 0; i < playerLives; i++) {
+                RectangleShape lifeBox({ 15.0f, 15.0f });
+                lifeBox.setPosition({ 50.0f + (i * 25.0f), 1030.0f }); lifeBox.setFillColor(Color::Cyan);
+                lifeBox.setOutlineColor(Color::White); lifeBox.setOutlineThickness(1.0f); window.draw(lifeBox);
+            }
+            for (int i = 0; i < flowerMaxHP; i++) {
+                RectangleShape hpBox({ 30.0f, 30.0f });
+                hpBox.setPosition({ 1400.0f + (i * 45.0f), 1005.0f });
+                if (i < flowerHP) hpBox.setFillColor(Color::Magenta); else hpBox.setFillColor(Color(80, 0, 80));
+                hpBox.setOutlineColor(Color::White); hpBox.setOutlineThickness(1.0f); window.draw(hpBox);
+            }
+
+            scoreText.setString("SCORE : " + std::to_string(score)); window.draw(scoreText);
+
+            // ==========================================
+            // TAMPILAN PAUSE & GAME OVER (DITUMPUK DI ATAS GAME)
+            // ==========================================
+            if (gameState == 2) {
+                RectangleShape fade({ 1920.0f, 1080.0f });
+                fade.setFillColor(Color(0, 0, 0, 150));
+                window.draw(fade);
+
+                window.draw(resumeBtn);
+                window.draw(restartBtn);
+                window.draw(quitBtnPause);
+            }
+            else if (gameState == 3) {
+                RectangleShape fade({ 1920.0f, 1080.0f });
+                fade.setFillColor(Color(0, 0, 0, 180));
+                window.draw(fade);
+
+                window.draw(gameoverSprite);
+                window.draw(restartSquareBtn);
+
+                Text goText(font);
+                goText.setString("FINAL SCORE: " + std::to_string(score));
+                goText.setCharacterSize(50);
+                goText.setFillColor(Color::White);
+                goText.setPosition({ 1920.0f / 2.0f - 200.0f, 1080.0f / 2.0f + 150.0f });
+                window.draw(goText);
+            }
+        }
+
+        window.display();
+    }
+}
